@@ -1821,6 +1821,20 @@ _submit_input_buffer (D3DGstNvBaseEnc * nvenc, GstVideoCodecFrame * frame,
   return GST_FLOW_OK;
 }
 
+
+static void
+_do_prepare_next_gl_frame(GstGLContext* gl_context, gpointer * enc)
+{
+
+  D3DGstNvBaseEnc *nvenc = GST_D3D_NV_BASE_ENC(enc);
+  GST_OBJECT_LOCK (nvenc);
+  GstVideoCodecFrame * frame = nvenc->next_frame;
+  GST_OBJECT_UNLOCK (nvenc);
+  GstGLSyncMeta *sync_meta = gst_buffer_get_gl_sync_meta(frame->input_buffer);
+  gst_gl_sync_meta_set_sync_point(sync_meta, gl_context);
+
+}
+
 static GstFlowReturn
 gst_nv_base_enc_handle_frame (GstVideoEncoder * enc, GstVideoCodecFrame * frame)
 {
@@ -1837,21 +1851,22 @@ gst_nv_base_enc_handle_frame (GstVideoEncoder * enc, GstVideoCodecFrame * frame)
   guint frame_n = 0;
   g_assert (nvenc->encoder != NULL);
 
+  GST_OBJECT_LOCK (nvenc);
+  nvenc->next_frame = frame;
+  GST_OBJECT_LOCK (nvenc);
+
 
   if (g_atomic_int_compare_and_exchange (&nvenc->reconfig, TRUE, FALSE)) {
     if (!gst_nv_base_enc_set_format (enc, nvenc->input_state))
       return GST_FLOW_ERROR;
   }
-  /*
-#if HAVE_NVENC_GST_GL
-  if (nvenc->gl_input)
-    in_map_flags |= GST_MAP_GL;
+
+#if 0
+  if (!gst_video_frame_map (&vframe, info, frame->input_buffer, GST_MAP_GL | GST_MAP_READ))
+    return GST_FLOW_ERROR;
+  frame->input_buffer->
+  dxgi_mem->mem.mem.context->gl_vtable->Flush();
 #endif
-  
-    */
-  // DON"T MAP GL ! in_map_flags |= GST_MAP_GL;
-  //if (!gst_video_frame_map (&vframe, info, frame->input_buffer, in_map_flags))
-  //  return GST_FLOW_ERROR;
 
   /* make sure our thread that waits for output to be ready is started */
   if (nvenc->bitstream_thread == NULL) {
@@ -1883,11 +1898,14 @@ gst_nv_base_enc_handle_frame (GstVideoEncoder * enc, GstVideoCodecFrame * frame)
   data.frame = frame;
 //  data.info = &vframe.info;
   data.in_gl_resource = in_gl_resource;
+  GstGLDXGIMemory * dxgi_mem = (GstGLDXGIMemory*)in_gl_resource->gl_mem[0];
+
+
+  gst_gl_context_thread_add(nvenc->context, (GstGLContextThreadFunc) _do_prepare_gl_frame, self);
 
   //gst_gl_context_thread_add (in_gl_resource->gl_mem[0]->mem.context,
   //    (GstGLContextThreadFunc) _map_gl_input_buffer, &data);
-  in_gl_resource->nv_resource.resourceToRegister =
-    ((GstGLDXGIMemory*)in_gl_resource->gl_mem[0])->d3d11texture;
+  in_gl_resource->nv_resource.resourceToRegister = dxgi_mem->d3d11texture;
   nv_ret =
       NvEncRegisterResource (nvenc->encoder,
       &in_gl_resource->nv_resource);
@@ -1896,6 +1914,7 @@ gst_nv_base_enc_handle_frame (GstVideoEncoder * enc, GstVideoCodecFrame * frame)
       in_gl_resource, nv_ret);
     return GST_FLOW_ERROR;
   }
+
 #if 0
   in_gl_resource->nv_mapped_resource.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
   in_gl_resource->nv_mapped_resource.registeredResource =
@@ -2153,6 +2172,9 @@ static gboolean gst_nv_base_enc_propose_allocation (GstVideoEncoder * enc, GstQu
   gst_buffer_pool_config_set_params (config, caps, vi_size, 0, 0);
   gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_GL_SYNC_META);
   gst_buffer_pool_config_set_allocator (config, GST_ALLOCATOR (self->allocator), &params);
+
+  if (self->context->gl_vtable->FenceSync)
+    gst_query_add_allocation_meta(query, GST_GL_SYNC_META_API_TYPE, 0);
 
   if (!gst_buffer_pool_set_config (self->pool, config)) {
     gst_object_unref (self->pool);
