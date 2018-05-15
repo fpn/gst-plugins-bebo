@@ -80,8 +80,6 @@ typedef struct {
   /* the supported input formats */
   GValue        * input_formats;                  /* OBJECT LOCK */
 
-  GstVideoCodecFrame * next_frame;
-
   GstVideoCodecState *input_state;
   volatile gint       reconfig;                   /* ATOMIC */
   gboolean            gl_input;
