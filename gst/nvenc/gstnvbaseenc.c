@@ -583,14 +583,14 @@ _create_device_d3d11() {
   GST_DEBUG("CreateDevice HR: 0x%08x, level_used: 0x%08x (%d)", hr,
       (unsigned int) level_used, (unsigned int) level_used);
 
-  //GUID myIID_ID3D112Multithread = {
-  //  0x9B7E4E00, 0x342C, 0x4106, {0xA1, 0x9F, 0x4F, 0x27, 0x04, 0xF6, 0x89, 0xF0} };
+  GUID myIID_ID3D112Multithread = {
+    0x9B7E4E00, 0x342C, 0x4106, {0xA1, 0x9F, 0x4F, 0x27, 0x04, 0xF6, 0x89, 0xF0} };
 
-  //ID3D11Multithread *mt;
-  //hr = (device)->lpVtbl->QueryInterface(device, &myIID_ID3D112Multithread,
-  //    (void**)&mt);
-  //g_assert(hr == S_OK);
-  //mt->lpVtbl->SetMultithreadProtected(mt, TRUE);
+  ID3D11Multithread *mt;
+  hr = (device)->lpVtbl->QueryInterface(device, &myIID_ID3D112Multithread,
+      (void**)&mt);
+  g_assert(hr == S_OK);
+  mt->lpVtbl->SetMultithreadProtected(mt, TRUE);
 
   return device;
 }
@@ -1858,6 +1858,12 @@ gst_nv_base_enc_handle_frame (GstVideoEncoder * enc, GstVideoCodecFrame * frame)
   GST_INFO("HANDLE FRAME");
   gpointer input_buffer = NULL;
   D3DGstNvBaseEnc *nvenc = GST_D3D_NV_BASE_ENC (enc);
+
+  {
+    GstGLSyncMeta *sync_meta = gst_buffer_get_gl_sync_meta(frame->input_buffer);
+    gst_gl_sync_meta_set_sync_point(sync_meta, nvenc->context);
+  }
+
   g_queue_push_tail(nvenc->frame_queue, frame);
   if (g_queue_get_length(nvenc->frame_queue) < 5) {
     return GST_FLOW_OK;
@@ -1883,8 +1889,8 @@ gst_nv_base_enc_handle_frame (GstVideoEncoder * enc, GstVideoCodecFrame * frame)
   if (nvenc->gl_input)
     in_map_flags |= GST_MAP_GL;
 #endif
-
     */
+
   // DON"T MAP GL ! in_map_flags |= GST_MAP_GL;
   //if (!gst_video_frame_map (&vframe, info, frame->input_buffer, in_map_flags))
   //  return GST_FLOW_ERROR;
@@ -1893,6 +1899,11 @@ gst_nv_base_enc_handle_frame (GstVideoEncoder * enc, GstVideoCodecFrame * frame)
   if (nvenc->bitstream_thread == NULL) {
     if (!gst_nv_base_enc_start_bitstream_thread (nvenc))
       goto error;
+  }
+
+  {
+    GstGLSyncMeta *sync_meta = gst_buffer_get_gl_sync_meta(frame->input_buffer);
+    gst_gl_sync_meta_wait(sync_meta, nvenc->context);
   }
 
   flow = _acquire_input_buffer (nvenc, &input_buffer);
