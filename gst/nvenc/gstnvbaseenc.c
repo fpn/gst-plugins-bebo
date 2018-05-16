@@ -232,7 +232,7 @@ gst_nv_base_enc_class_init (D3DGstNvBaseEncClass * klass)
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
   GstElementClass *element_class = GST_ELEMENT_CLASS (klass);
   GstVideoEncoderClass *videoenc_class = GST_VIDEO_ENCODER_CLASS (klass);
-  // Why does GStreamer load the dll and do nothing with it?  This seems like a bug. 
+  // Why does GStreamer load the dll and do nothing with it?  This seems like a bug.
   // We need to load it where we initialize the encoder.
   //void *nvenc = LoadLibrary("nvEncodeAPI64.dll");
   //if (nvenc == NULL) {
@@ -581,7 +581,7 @@ _create_device_d3d11() {
 
   GST_DEBUG("CreateDevice HR: 0x%08x, level_used: 0x%08x (%d)", hr,
       (unsigned int) level_used, (unsigned int) level_used);
-  
+
   //GUID myIID_ID3D112Multithread = {
   //  0x9B7E4E00, 0x342C, 0x4106, {0xA1, 0x9F, 0x4F, 0x27, 0x04, 0xF6, 0x89, 0xF0} };
 
@@ -630,6 +630,7 @@ gst_nv_base_enc_ensure_gl_context(GstVideoEncoder * enc)
           (GstGLDisplay **) & self->display,
           (GstGLContext **) & self->other_context);
   }
+  GST_INFO_OBJECT(self, "other_context:%" GST_PTR_FORMAT, self->other_context);
 
   if (!self->context) {
     GST_OBJECT_LOCK (self->display);
@@ -651,6 +652,7 @@ gst_nv_base_enc_ensure_gl_context(GstVideoEncoder * enc)
     } while (!gst_gl_display_add_context (self->display, self->context));
     GST_OBJECT_UNLOCK (self->display);
   }
+  GST_INFO_OBJECT(self, "context:%" GST_PTR_FORMAT, self->context);
 
   gst_gl_context_thread_add(self->context, (GstGLContextThreadFunc) _init_d3d11_context, self);
 
@@ -905,6 +907,28 @@ unlock_bitstream_helper(GstGLContext *ctx, struct bslock* bs) {
   }
 }
 
+struct umh {
+  void* encoder;
+  struct gl_input_resource * in_gl_resource;
+};
+
+static void
+unmap_helper(GstGLContext *ctx, struct umh *u) {
+  NVENCSTATUS nv_ret =
+    NvEncUnmapInputResource(u->encoder,
+      u->in_gl_resource->nv_mapped_resource.mappedResource);
+  if (nv_ret != NV_ENC_SUCCESS) {
+    GST_ERROR_OBJECT("Failed to unmap input resource %p, ret %d",
+      u->in_gl_resource, nv_ret);
+  }
+  nv_ret =
+    NvEncUnregisterResource(u->encoder,
+      u->in_gl_resource->nv_resource.registeredResource);
+  if (nv_ret != NV_ENC_SUCCESS)
+    GST_ERROR_OBJECT("Failed to unregister resource %p, ret %d",
+      u->in_gl_resource, nv_ret);
+}
+
 static gpointer
 gst_nv_base_enc_bitstream_thread (gpointer user_data)
 {
@@ -1013,27 +1037,20 @@ gst_nv_base_enc_bitstream_thread (gpointer user_data)
     for (i = 0; i < state->n_buffers; i++) {
       void *in_buf = state->in_bufs[i];
       g_assert (in_buf != NULL);
-
-#if HAVE_NVENC_GST_GL
       if (nvenc->gl_input) {
         struct gl_input_resource *in_gl_resource = in_buf;
         gst_buffer_unref(in_gl_resource->buf);
 
-#if 0
-        nv_ret =
-            NvEncUnmapInputResource (nvenc->encoder,
-            in_gl_resource->nv_mapped_resource.mappedResource);
-        if (nv_ret != NV_ENC_SUCCESS) {
-          GST_ERROR_OBJECT (nvenc, "Failed to unmap input resource %p, ret %d",
-              in_gl_resource, nv_ret);
-          break;
-        }
+        struct umh u = {
+          .encoder = nvenc->encoder,
+          .in_gl_resource = in_gl_resource
+        };
+        gst_gl_context_thread_add(nvenc->context, unmap_helper, &u);
 
         memset (&in_gl_resource->nv_mapped_resource, 0,
             sizeof (in_gl_resource->nv_mapped_resource));
-#endif
       }
-#endif
+
 
       g_async_queue_push (nvenc->in_bufs_pool, in_buf);
     }
@@ -1776,7 +1793,7 @@ _submit_input_buffer (D3DGstNvBaseEnc * nvenc, GstVideoCodecFrame * frame,
       outputBufferPtr, GST_TIME_ARGS (frame->pts));
 
   GstVideoMeta * meta = gst_buffer_get_video_meta(frame->input_buffer);
-  
+
   pic_params.version = NV_ENC_PIC_PARAMS_VER;
   pic_params.inputBuffer = inputBufferPtr;
   pic_params.bufferFmt = bufferFormat;
@@ -1850,7 +1867,6 @@ gst_nv_base_enc_handle_frame (GstVideoEncoder * enc, GstVideoCodecFrame * frame)
   guint frame_n = 0;
   g_assert (nvenc->encoder != NULL);
 
-
   if (g_atomic_int_compare_and_exchange (&nvenc->reconfig, TRUE, FALSE)) {
     if (!gst_nv_base_enc_set_format (enc, nvenc->input_state))
       return GST_FLOW_ERROR;
@@ -1860,7 +1876,7 @@ gst_nv_base_enc_handle_frame (GstVideoEncoder * enc, GstVideoCodecFrame * frame)
   if (nvenc->gl_input)
     in_map_flags |= GST_MAP_GL;
 #endif
-  
+
     */
   // DON"T MAP GL ! in_map_flags |= GST_MAP_GL;
   //if (!gst_video_frame_map (&vframe, info, frame->input_buffer, in_map_flags))
@@ -1909,7 +1925,7 @@ gst_nv_base_enc_handle_frame (GstVideoEncoder * enc, GstVideoCodecFrame * frame)
       in_gl_resource, nv_ret);
     return GST_FLOW_ERROR;
   }
-#if 0
+#if 1
   in_gl_resource->nv_mapped_resource.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
   in_gl_resource->nv_mapped_resource.registeredResource =
       in_gl_resource->nv_resource.registeredResource;
@@ -1938,6 +1954,7 @@ gst_nv_base_enc_handle_frame (GstVideoEncoder * enc, GstVideoCodecFrame * frame)
 
   gst_buffer_ref(frame->input_buffer);  // FIXME unref somewhere
   in_gl_resource->buf = frame->input_buffer;
+
   flow =
     _submit_input_buffer(nvenc, frame, &info, in_gl_resource,
       in_gl_resource->nv_resource.registeredResource,
@@ -1949,7 +1966,7 @@ gst_nv_base_enc_handle_frame (GstVideoEncoder * enc, GstVideoCodecFrame * frame)
     * in the thread where we get the output buffers and finish it there */
   gst_video_codec_frame_unref (frame);
   frame = NULL;
-  
+
   if (flow != GST_FLOW_OK)
     goto out;
 
@@ -2130,7 +2147,7 @@ static gboolean gst_nv_base_enc_propose_allocation (GstVideoEncoder * enc, GstQu
 
   allocator = GST_ALLOCATOR (self->allocator);
   gst_query_add_allocation_param (query, allocator, &params);
-  gst_object_unref (allocator); 
+  gst_object_unref (allocator);
 
   GstVideoInfo info;
   if (!gst_video_info_from_caps (&info, caps))
