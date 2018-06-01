@@ -31,6 +31,7 @@
 #include "bebosquisher/gstglvideomixer.h"
 #include "bebosquisher/gstglstereomix.h"
 #include "bufferholder/gstbufferholder.h"
+#include "x264/gstx264enc.h"
 
 static gboolean
 plugin_init (GstPlugin * plugin)
@@ -52,7 +53,6 @@ plugin_init (GstPlugin * plugin)
     GST_RANK_NONE, gst_gl_video_mixer_bin_get_type())) {
     return FALSE;
   }
-
   if (!gst_element_register(plugin, "beboglvideomixerelement",
     GST_RANK_NONE, gst_gl_video_mixer_get_type())) {
     return FALSE;
@@ -63,6 +63,10 @@ plugin_init (GstPlugin * plugin)
   }
   if (!gst_element_register(plugin, "bufferholder",
     GST_RANK_NONE, GST_TYPE_BUFFER_HOLDER)) {
+    return FALSE;
+  }
+  if (!gst_element_register(plugin, "x264enc",
+    GST_RANK_NONE, GST_TYPE_X264_ENC)) {
     return FALSE;
   }
 

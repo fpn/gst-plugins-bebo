@@ -90,6 +90,11 @@ SET(bebosquisher_HEADERS
   bebosquisher/gstglutils.h
 )
 
+SET(x264_FILES
+  x264/gstx264enc.c
+  x264/gstx264enc.h
+)
+
 source_group("nvenc" FILES ${nvenc_SOURCES} ${nvenc_HEADERS})
 source_group("gstdshowsink" FILES ${gstdshowsink_SOURCES} ${gstdshowsink_HEADERS})
 source_group("gl2dxgi" FILES ${gl2dxgi_SOURCES} ${gl2dxgi_HEADERS})
@@ -97,6 +102,13 @@ source_group("shared" FILES ${shared_SOURCES} ${shared_HEADERS})
 source_group("plugin_init" FILES gstbeboplugin.c)
 source_group("bebosquisher" FILES ${bebosquisher_SOURCES} ${bebosquisher_HEADERS})
 source_group("bufferholder" FILES ${buffer_holder_FILES})
+source_group("x264" FILES ${x264_FILES})
+
+
+LINK_DIRECTORIES(
+  ${GST_INSTALL_BASE}/lib
+  ${CMAKE_SOURCE_DIR}/third_party/x264
+)
 
 ADD_LIBRARY(libbebogst SHARED
   gstbeboplugin.c
@@ -111,6 +123,7 @@ ADD_LIBRARY(libbebogst SHARED
   ${bebosquisher_SOURCES}
   ${bebosquisher_HEADERS}
   ${buffer_holder_FILES}
+  ${x264_FILES}
 )
 
 TARGET_LINK_LIBRARIES(libbebogst
@@ -132,6 +145,7 @@ TARGET_LINK_LIBRARIES(libbebogst
   gstbadvideo-1.0
   gstpbutils-1.0
   gstcontroller-1.0
+  libx264
 )
 
 INCLUDE_DIRECTORIES(
@@ -147,10 +161,7 @@ INCLUDE_DIRECTORIES(
   ${CMAKE_SOURCE_DIR}/gst
   ${CMAKE_SOURCE_DIR}/shared
   ${CUDA_PATH}
-)
-
-LINK_DIRECTORIES(
-  ${GST_INSTALL_BASE}/lib
+  ${CMAKE_SOURCE_DIR}/third_party/x264
 )
 
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MT /Zi")

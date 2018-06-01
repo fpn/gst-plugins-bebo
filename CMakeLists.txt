@@ -20,6 +20,7 @@ set_property(GLOBAL PROPERTY OS_FOLDERS ON)
 find_package(D3D11 REQUIRED)
 include(DownloadDependency)
 DownloadDependency("https://s3-us-west-1.amazonaws.com/bebo-app/repo/gstreamer-base/gstreamer.tar.bz2" "gstreamer")
+DownloadDependency("https://s3-us-west-1.amazonaws.com/bebo-app/repo/third_party/x264_repo.tar.bz2" "x264_repo")
 
 # DownloadDependency("https://s3-us-west-1.amazonaws.com/bebo-app/repo/third_party/Video_Codec_SDK_7.1.9.tar.bz2" "Video_Codec_SDK_7.1.9")
 #
