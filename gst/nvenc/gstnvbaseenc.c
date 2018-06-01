@@ -1511,7 +1511,7 @@ gst_nv_base_enc_set_format (GstVideoEncoder * enc, GstVideoCodecState * state)
 
     num_macroblocks = (GST_ROUND_UP_16 (input_width) >> 4)
         * (GST_ROUND_UP_16 (input_height) >> 4);
-    nvenc->n_bufs = (num_macroblocks >= 8160) ? 32 : 48;
+    nvenc->n_bufs = 64;
 
     /* input buffers */
     nvenc->input_bufs = g_new0 (gpointer, nvenc->n_bufs);
