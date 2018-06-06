@@ -900,6 +900,9 @@ gst_x264_enc_class_init (GstX264EncClass * klass)
   GstPadTemplate *sink_templ;
   GstCaps *supported_sinkcaps;
 
+  GST_DEBUG_CATEGORY_INIT(x264_enc_debug, "x264enc", 0,
+    "h264 encoding element");
+
   x264enc_defaults = g_string_new ("");
 
   gobject_class = G_OBJECT_CLASS (klass);
@@ -1424,7 +1427,7 @@ gst_x264_enc_parse_options (GstX264Enc * encoder, const gchar * str)
     GStrv key_val = g_strsplit (kvpairs[i], "=", 2);
 
     parse_result =
-        encoder->vtable->x264_param_parse (&encoder->x264param, key_val[0],
+        x264_param_parse (&encoder->x264param, key_val[0],
         key_val[1]);
 
     if (parse_result == X264_PARAM_BAD_NAME) {
@@ -1513,14 +1516,7 @@ gst_x264_enc_init_encoder (GstX264Enc * encoder)
 
   GST_OBJECT_LOCK (encoder);
 
-  if (GST_VIDEO_INFO_COMP_DEPTH (info, 0) == 8)
-    encoder->vtable = vtable_8bit;
-  else if (GST_VIDEO_INFO_COMP_DEPTH (info, 0) == 10)
-    encoder->vtable = vtable_10bit;
-
-  g_assert (encoder->vtable != NULL);
-
-  encoder->vtable->x264_param_default (&encoder->x264param);
+  x264_param_default (&encoder->x264param);
   /* log callback setup; part of parameters */
   encoder->x264param.pf_log = gst_x264_enc_log_callback;
   encoder->x264param.p_log_private = encoder;
@@ -1532,7 +1528,7 @@ gst_x264_enc_init_encoder (GstX264Enc * encoder)
   GST_DEBUG_OBJECT (encoder, "Applying defaults with preset %s, tunings %s",
       encoder->speed_preset ? x264_preset_names[encoder->speed_preset - 1] : "",
       encoder->tunings && encoder->tunings->len ? encoder->tunings->str : "");
-  encoder->vtable->x264_param_default_preset (&encoder->x264param,
+  x264_param_default_preset (&encoder->x264param,
       encoder->speed_preset ? x264_preset_names[encoder->speed_preset -
           1] : NULL, encoder->tunings
       && encoder->tunings->len ? encoder->tunings->str : NULL);
@@ -1780,7 +1776,7 @@ skip_vui_parameters:
     case 1:
       encoder->x264param.rc.b_stat_read = 0;
       encoder->x264param.rc.b_stat_write = 1;
-      encoder->vtable->x264_param_apply_fastfirstpass (&encoder->x264param);
+      x264_param_apply_fastfirstpass (&encoder->x264param);
       encoder->x264param.i_frame_reference = 1;
       encoder->x264param.analyse.b_transform_8x8 = 0;
       encoder->x264param.analyse.inter = 0;
@@ -1801,7 +1797,7 @@ skip_vui_parameters:
   }
 
   if (encoder->peer_profile) {
-    if (encoder->vtable->x264_param_apply_profile (&encoder->x264param,
+    if (x264_param_apply_profile (&encoder->x264param,
             encoder->peer_profile))
       GST_WARNING_OBJECT (encoder, "Bad downstream profile name: %s",
           encoder->peer_profile);
@@ -1816,17 +1812,17 @@ skip_vui_parameters:
     gint i;
     const x264_level_t *peer_level = NULL;
 
-    for (i = 0; (*encoder->vtable->x264_levels)[i].level_idc; i++) {
+    for (i = 0; x264_levels[i].level_idc; i++) {
       if (encoder->peer_level_idc ==
-          (*encoder->vtable->x264_levels)[i].level_idc) {
+          x264_levels[i].level_idc) {
         int mb_width = (info->width + 15) / 16;
         int mb_height = (info->height + 15) / 16;
         int mbs = mb_width * mb_height;
 
-        if ((*encoder->vtable->x264_levels)[i].frame_size < mbs ||
-            (*encoder->vtable->x264_levels)[i].frame_size * 8 <
+        if (x264_levels[i].frame_size < mbs ||
+            x264_levels[i].frame_size * 8 <
             mb_width * mb_width
-            || (*encoder->vtable->x264_levels)[i].frame_size * 8 <
+            || x264_levels[i].frame_size * 8 <
             mb_height * mb_height) {
           GST_WARNING_OBJECT (encoder,
               "Frame size larger than level %d allows",
@@ -1834,7 +1830,7 @@ skip_vui_parameters:
           break;
         }
 
-        if (info->fps_d && (*encoder->vtable->x264_levels)[i].mbps
+        if (info->fps_d && x264_levels[i].mbps
             < (gint64) mbs * info->fps_n / info->fps_d) {
           GST_WARNING_OBJECT (encoder,
               "Macroblock rate higher than level %d allows",
@@ -1842,7 +1838,7 @@ skip_vui_parameters:
           break;
         }
 
-        peer_level = &(*encoder->vtable->x264_levels)[i];
+        peer_level = &x264_levels[i];
         break;
       }
     }
@@ -1897,7 +1893,7 @@ skip_vui_parameters:
 
   GST_OBJECT_UNLOCK (encoder);
 
-  encoder->x264enc = encoder->vtable->x264_encoder_open (&encoder->x264param);
+  encoder->x264enc = x264_encoder_open (&encoder->x264param);
   if (!encoder->x264enc) {
     GST_ELEMENT_ERROR (encoder, STREAM, ENCODE,
         ("Can not initialize x264 encoder."), (NULL));
@@ -1920,7 +1916,7 @@ static void
 gst_x264_enc_close_encoder (GstX264Enc * encoder)
 {
   if (encoder->x264enc != NULL) {
-    encoder->vtable->x264_encoder_close (encoder->x264enc);
+    x264_encoder_close (encoder->x264enc);
     encoder->x264enc = NULL;
   }
   encoder->vtable = NULL;
@@ -1941,7 +1937,7 @@ gst_x264_enc_set_profile_and_level (GstX264Enc * encoder, GstCaps * caps)
   const gchar *allowed_profile;
 
   header_return =
-      encoder->vtable->x264_encoder_headers (encoder->x264enc, &nal, &i_nal);
+      x264_encoder_headers (encoder->x264enc, &nal, &i_nal);
   if (header_return < 0) {
     GST_ELEMENT_ERROR (encoder, STREAM, ENCODE, ("Encode x264 header failed."),
         ("x264_encoder_headers return code=%d", header_return));
@@ -2028,7 +2024,7 @@ gst_x264_enc_header_buf (GstX264Enc * encoder)
   /* Create avcC header. */
 
   header_return =
-      encoder->vtable->x264_encoder_headers (encoder->x264enc, &nal, &i_nal);
+      x264_encoder_headers (encoder->x264enc, &nal, &i_nal);
   if (header_return < 0) {
     GST_ELEMENT_ERROR (encoder, STREAM, ENCODE, ("Encode x264 header failed."),
         ("x264_encoder_headers return code=%d", header_return));
@@ -2191,7 +2187,7 @@ gst_x264_enc_set_latency (GstX264Enc * encoder)
   GstClockTime latency;
 
   max_delayed_frames =
-      encoder->vtable->x264_encoder_maximum_delayed_frames (encoder->x264enc);
+      x264_encoder_maximum_delayed_frames (encoder->x264enc);
 
   if (info->fps_n) {
     latency = gst_util_uint64_scale_ceil (GST_SECOND * info->fps_d,
@@ -2469,7 +2465,7 @@ gst_x264_enc_encode_frame (GstX264Enc * encoder, x264_picture_t * pic_in,
   GST_OBJECT_LOCK (encoder);
   if (encoder->reconfig) {
     encoder->reconfig = FALSE;
-    if (encoder->vtable->x264_encoder_reconfig (encoder->x264enc,
+    if (x264_encoder_reconfig (encoder->x264enc,
             &encoder->x264param) < 0)
       GST_WARNING_OBJECT (encoder, "Could not reconfigure");
     update_latency = TRUE;
@@ -2479,7 +2475,7 @@ gst_x264_enc_encode_frame (GstX264Enc * encoder, x264_picture_t * pic_in,
     if (GST_VIDEO_CODEC_FRAME_IS_FORCE_KEYFRAME (input_frame)) {
       GST_INFO_OBJECT (encoder, "Forcing key frame");
       if (encoder->intra_refresh)
-        encoder->vtable->x264_encoder_intra_refresh (encoder->x264enc);
+        x264_encoder_intra_refresh (encoder->x264enc);
       else
         pic_in->i_type = X264_TYPE_IDR;
     }
@@ -2489,7 +2485,7 @@ gst_x264_enc_encode_frame (GstX264Enc * encoder, x264_picture_t * pic_in,
   if (G_UNLIKELY (update_latency))
     gst_x264_enc_set_latency (encoder);
 
-  encoder_return = encoder->vtable->x264_encoder_encode (encoder->x264enc,
+  encoder_return = x264_encoder_encode (encoder->x264enc,
       &nal, i_nal, pic_in, &pic_out);
 
   if (encoder_return < 0) {
@@ -2561,15 +2557,12 @@ gst_x264_enc_flush_frames (GstX264Enc * encoder, gboolean send)
     do {
       flow_ret = gst_x264_enc_encode_frame (encoder, NULL, NULL, &i_nal, send);
     } while (flow_ret == GST_FLOW_OK
-        && encoder->vtable->x264_encoder_delayed_frames (encoder->x264enc) > 0);
+        && x264_encoder_delayed_frames (encoder->x264enc) > 0);
 }
 
 static void
 gst_x264_enc_reconfig (GstX264Enc * encoder)
 {
-  if (!encoder->vtable)
-    return;
-
   switch (encoder->pass) {
     case GST_X264_ENC_PASS_QUAL:
       encoder->x264param.rc.f_rf_constant = encoder->quantizer;
