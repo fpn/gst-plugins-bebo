@@ -47,7 +47,7 @@
 
 #define N_BUFFERS_PER_FRAME 1
 #define SUPPORTED_GL_APIS GST_GL_API_OPENGL3
-#define BUFFER_COUNT 50
+#define BUFFER_COUNT 30
 
 /* magic pointer value we can put in the async queue to signal shut down */
 #define SHUTDOWN_COOKIE ((gpointer)GINT_TO_POINTER (1))
@@ -569,12 +569,6 @@ gst_nv_base_enc_open (GstVideoEncoder * enc)
     GST_ERROR("COULD NOT OPEN");
     return FALSE;
   }
-  /*nvenc->cuda_ctx = gst_nvenc_create_cuda_context (nvenc->cuda_device_id);
-  if (nvenc->cuda_ctx == NULL) {
-    GST_ELEMENT_ERROR (enc, LIBRARY, INIT, (NULL),
-        ("Failed to create CUDA context, perhaps CUDA is not supported."));
-    return FALSE;
-  } */
 
   {
     GST_INFO("CREATING_ENCODER");
@@ -601,8 +595,6 @@ gst_nv_base_enc_open (GstVideoEncoder * enc)
     nv_ret = gl_NvEncOpenEncodeSessionEx(nvenc->context, &params, &nvenc->encoder);
     if (nv_ret != NV_ENC_SUCCESS) {
       GST_ERROR ("Failed to create NVENC encoder session, ret=%d", nv_ret);
-      //if (gst_nvenc_destroy_cuda_context (nvenc->cuda_ctx))
-        //nvenc->cuda_ctx = NULL;
       return FALSE;
     }
     GST_INFO ("created NVENC encoder %p", nvenc->encoder);
@@ -671,6 +663,7 @@ gst_nv_base_enc_start (GstVideoEncoder * enc)
   nvenc->bitstream_pool = g_async_queue_new ();
   nvenc->bitstream_queue = g_async_queue_new ();
   nvenc->in_bufs_pool = g_async_queue_new ();
+  nvenc->holding_queue = g_async_queue_new(); 
 
   nvenc->last_flow = GST_FLOW_OK;
   nvenc->allocator = gst_gl_dxgi_memory_allocator_new();
@@ -702,13 +695,18 @@ static gboolean
 gst_nv_base_enc_stop (GstVideoEncoder * enc)
 {
   D3DGstNvBaseEnc *nvenc = GST_D3D_NV_BASE_ENC (enc);
-
+  GST_INFO("Stopping NVENC");
+  gst_nv_base_enc_drain_encoder(nvenc);
   gst_nv_base_enc_stop_bitstream_thread (nvenc);
   gst_nv_base_enc_free_buffers (nvenc);
 
   if (nvenc->bitstream_pool) {
     g_async_queue_unref (nvenc->bitstream_pool);
     nvenc->bitstream_pool = NULL;
+  }
+  if (nvenc->holding_queue) {
+    g_async_queue_unref(nvenc->holding_queue);
+    nvenc->holding_queue = NULL;
   }
   if (nvenc->bitstream_queue) {
     g_async_queue_unref (nvenc->bitstream_queue);
@@ -735,7 +733,7 @@ gst_nv_base_enc_stop (GstVideoEncoder * enc)
     gst_object_unref (nvenc->allocator);
   }
   nvenc->allocator = NULL;
-
+  GST_INFO("Stop complete");
   return TRUE;
 }
 
@@ -816,18 +814,12 @@ static gboolean
 gst_nv_base_enc_close (GstVideoEncoder * enc)
 {
   D3DGstNvBaseEnc *nvenc = GST_D3D_NV_BASE_ENC (enc);
-
+  GST_DEBUG("Closing encoder");
   if (nvenc->encoder) {
     if (NvEncDestroyEncoder (nvenc->encoder) != NV_ENC_SUCCESS)
       return FALSE;
     nvenc->encoder = NULL;
   }
-
-  //if (nvenc->cuda_ctx) {
-  //  if (!gst_nvenc_destroy_cuda_context (nvenc->cuda_ctx))
-  //    return FALSE;
-  //  nvenc->cuda_ctx = NULL;
-  //}
 
   GST_OBJECT_LOCK (nvenc);
   g_free (nvenc->input_formats);
@@ -844,7 +836,7 @@ gst_nv_base_enc_close (GstVideoEncoder * enc)
     g_async_queue_unref (nvenc->bitstream_pool);
     nvenc->bitstream_pool = NULL;
   }
-
+  GST_DEBUG("Encoder successfully closed");
   return TRUE;
 }
 
@@ -915,8 +907,11 @@ lock_bitstream_helper(GstGLContext *ctx, struct bslock* bs) {
   NVENCSTATUS nv_ret = NvEncLockBitstream(bs->encoder, bs->lock_bs);
   if (nv_ret != NV_ENC_SUCCESS) {
     /* FIXME: what to do here? */
-    GST_ERROR("Failed to lock bitstream: %d", nv_ret);
+    GST_ERROR("Failed to lock bitstream: %d, %d", nv_ret, bs->out_buf);
     bs->out_buf = SHUTDOWN_COOKIE;
+  }
+  else {
+    GST_INFO("LOCKED Bitstream: %d", bs->out_buf);
   }
 }
 
@@ -991,13 +986,12 @@ gst_nv_base_enc_bitstream_thread (gpointer user_data)
         GST_LOG_OBJECT (enc, "wait for bitstream buffer..");
 
         /* assumes buffers are submitted in order */
-        // FIXME: Only submit buffers to the bitstream queue when the encoder has enough output.
-        while (g_async_queue_length(nvenc->bitstream_queue) < 17) {
-          Sleep(10);
-        }
         out_buf = g_async_queue_pop (nvenc->bitstream_queue);
-        if ((gpointer) out_buf == SHUTDOWN_COOKIE)
+        if ((gpointer)out_buf == SHUTDOWN_COOKIE) {
+          GST_DEBUG("Bitstream thread got shutdown cookie");
           break;
+        }
+
 
         GST_LOG_OBJECT (nvenc, "waiting for output buffer %p to be ready",
             out_buf);
@@ -1087,8 +1081,12 @@ gst_nv_base_enc_bitstream_thread (gpointer user_data)
 
     if (flow != GST_FLOW_OK) {
       GST_INFO_OBJECT (enc, "got flow %s", gst_flow_get_name (flow));
-      g_atomic_int_set (&nvenc->last_flow, flow);
-      break;
+      if (flow != GST_FLOW_FLUSHING || (
+        !g_async_queue_length(nvenc->bitstream_queue) &&
+        !g_async_queue_length(nvenc->holding_queue))) {
+        g_atomic_int_set(&nvenc->last_flow, flow);
+        break;
+      }
     }
   }
   while (TRUE);
@@ -1123,15 +1121,19 @@ static gboolean
 gst_nv_base_enc_stop_bitstream_thread (D3DGstNvBaseEnc * nvenc)
 {
   gpointer out_buf;
-
+  GST_DEBUG("Stopping bitstream thread.");
   if (nvenc->bitstream_thread == NULL)
     return TRUE;
+  g_async_queue_lock(nvenc->bitstream_queue);
+  g_async_queue_lock(nvenc->bitstream_pool);
+  g_async_queue_lock(nvenc->holding_queue);
 
-  /* FIXME */
-  // FIXME: Rowan handle the queued up frames when we stop.
+  while (g_async_queue_length_unlocked(nvenc->holding_queue) > 0) {
+    GST_DEBUG("Encoder is drained so moving buffer from holding to bitstream queue.");
+    g_async_queue_push_unlocked(nvenc->bitstream_queue, g_async_queue_pop_unlocked(nvenc->holding_queue));
+  }
   GST_FIXME_OBJECT (nvenc, "stop bitstream reading thread properly");
-  g_async_queue_lock (nvenc->bitstream_queue);
-  g_async_queue_lock (nvenc->bitstream_pool);
+
   //while ((out_buf = g_async_queue_try_pop_unlocked (nvenc->bitstream_queue))) {
   //  GST_INFO_OBJECT (nvenc, "stole bitstream buffer %p from queue", out_buf);
   //  g_async_queue_push_unlocked (nvenc->bitstream_pool, out_buf);
@@ -1139,12 +1141,14 @@ gst_nv_base_enc_stop_bitstream_thread (D3DGstNvBaseEnc * nvenc)
   g_async_queue_push_unlocked (nvenc->bitstream_queue, SHUTDOWN_COOKIE);
   g_async_queue_unlock (nvenc->bitstream_pool);
   g_async_queue_unlock (nvenc->bitstream_queue);
+  g_async_queue_unlock (nvenc->holding_queue);
+
 
   /* temporary unlock, so other thread can find and push frame */
   GST_VIDEO_ENCODER_STREAM_UNLOCK (nvenc);
   g_thread_join (nvenc->bitstream_thread);
   GST_VIDEO_ENCODER_STREAM_LOCK (nvenc);
-
+  GST_DEBUG("Bitstream thread stopped.");
   nvenc->bitstream_thread = NULL;
   return TRUE;
 }
@@ -1190,25 +1194,10 @@ gst_nv_base_enc_free_buffers (D3DGstNvBaseEnc * nvenc)
   for (i = 0; i < nvenc->n_bufs; ++i) {
     NV_ENC_OUTPUT_PTR out_buf = nvenc->output_bufs[i];
 
-#if HAVE_NVENC_GST_GL
     if (nvenc->gl_input) {
       struct gl_input_resource *in_gl_resource = nvenc->input_bufs[i];
-
-      // cuCtxPushCurrent (nvenc->cuda_ctx);
-      //
-
-      // We register and unregister the resource each time we handle a frame.
-      //nv_ret =
-      //    NvEncUnregisterResource (nvenc->encoder,
-      //    in_gl_resource->nv_resource.registeredResource);
-      //if (nv_ret != NV_ENC_SUCCESS)
-      //  GST_ERROR_OBJECT (nvenc, "Failed to unregister resource %p, ret %d",
-      //      in_gl_resource, nv_ret);
-
       g_free (in_gl_resource);
-      //cuCtxPopCurrent (NULL);
     } else
-#endif
     {
       NV_ENC_INPUT_PTR in_buf = (NV_ENC_INPUT_PTR) nvenc->input_bufs[i];
 
@@ -1394,8 +1383,9 @@ gst_nv_base_enc_set_format (GstVideoEncoder * enc, GstVideoCodecState * state)
   if(NvEncGetEncodeCaps(nvenc->encoder, nvenc_class->codec_id,
     &caps_param, &supported) == NV_ENC_SUCCESS && supported) {
     GST_INFO("Enabling lookahead");
-    params->encodeConfig->rcParams.enableLookahead = 1;
-    params->encodeConfig->rcParams.lookaheadDepth = 16;
+    //params->encodeConfig->rcParams.enableLookahead = 0;
+    params->encodeConfig->rcParams.disableBadapt = 1; // disable b frames for now
+    params->encodeConfig->rcParams.lookaheadDepth = 8;
   }
 
   caps_param.capsToQuery = NV_ENC_CAPS_SUPPORT_TEMPORAL_AQ;
@@ -1403,8 +1393,8 @@ gst_nv_base_enc_set_format (GstVideoEncoder * enc, GstVideoCodecState * state)
   if (NvEncGetEncodeCaps(nvenc->encoder, nvenc_class->codec_id,
     &caps_param, &supported) == NV_ENC_SUCCESS && supported) {
     GST_INFO("Enabling temporal aq");
-    params->encodeConfig->rcParams.enableAQ = 1;
-    params->encodeConfig->rcParams.enableTemporalAQ = 1;
+    //params->encodeConfig->rcParams.enableAQ = 1;
+    //params->encodeConfig->rcParams.enableTemporalAQ = 1;
   }
 
   caps_param.capsToQuery = NV_ENC_CAPS_SUPPORT_WEIGHTED_PREDICTION;
@@ -1412,7 +1402,7 @@ gst_nv_base_enc_set_format (GstVideoEncoder * enc, GstVideoCodecState * state)
   if (NvEncGetEncodeCaps(nvenc->encoder, nvenc_class->codec_id,
     &caps_param, &supported) == NV_ENC_SUCCESS && supported) {
     GST_INFO("Enabling weighted prediction.");
-    params->enableWeightedPrediction = 1;
+    //params->enableWeightedPrediction = 1;
   }
 
   caps_param.capsToQuery = NV_ENC_CAPS_SUPPORT_BFRAME_REF_MODE;
@@ -1516,7 +1506,6 @@ gst_nv_base_enc_set_format (GstVideoEncoder * enc, GstVideoCodecState * state)
     /* input buffers */
     nvenc->input_bufs = g_new0 (gpointer, nvenc->n_bufs);
 
-#if HAVE_NVENC_GST_GL
     features = gst_caps_get_features (state->caps, 0);
     if (gst_caps_features_contains (features,
             GST_CAPS_FEATURE_MEMORY_GL_MEMORY)) {
@@ -1527,58 +1516,29 @@ gst_nv_base_enc_set_format (GstVideoEncoder * enc, GstVideoCodecState * state)
         pixel_depth += GST_VIDEO_INFO_COMP_DEPTH (info, i);
       }
 
-      //cuCtxPushCurrent (nvenc->cuda_ctx);
       for (i = 0; i < nvenc->n_bufs; ++i) {
         struct gl_input_resource *in_gl_resource =
             g_new0 (struct gl_input_resource, 1);
-        // CUresult cu_ret;
 
         memset (&in_gl_resource->nv_resource, 0,
             sizeof (in_gl_resource->nv_resource));
         memset (&in_gl_resource->nv_mapped_resource, 0,
             sizeof (in_gl_resource->nv_mapped_resource));
 
-        ///* scratch buffer for non-contigious planer into a contigious buffer */
-        //cu_ret =
-        //    cuMemAllocPitch ((CUdeviceptr *) & in_gl_resource->cuda_pointer,
-        //    &in_gl_resource->cuda_stride, input_width,
-        //    _get_frame_data_height (info), 16);
-        //if (cu_ret != CUDA_SUCCESS) {
-        //  const gchar *err;
-
-        //  cuGetErrorString (cu_ret, &err);
-        //  GST_ERROR_OBJECT (nvenc, "failed to alocate cuda scratch buffer "
-        //      "ret %d error :%s", cu_ret, err);
-        //  g_assert_not_reached ();
-        //}
-
         in_gl_resource->nv_resource.version = NV_ENC_REGISTER_RESOURCE_VER;
         in_gl_resource->nv_resource.resourceType =
           NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
         in_gl_resource->nv_resource.width = input_width;
         in_gl_resource->nv_resource.height = input_height;
-        //FIXME in_gl_resource->nv_resource.pitch = in_gl_resource->cuda_stride;
         in_gl_resource->nv_resource.pitch = input_width;
         in_gl_resource->nv_resource.bufferFormat =
             gst_nvenc_get_nv_buffer_format (GST_VIDEO_INFO_FORMAT (info));
-#if 0
-        in_gl_resource->nv_resource.resourceToRegister =
-          ((GstGLDXGIMemory*)in_gl_resource->gl_mem[0])->d3d11texture;
-        nv_ret =
-            NvEncRegisterResource (nvenc->encoder,
-            &in_gl_resource->nv_resource);
-        if (nv_ret != NV_ENC_SUCCESS)
-          GST_ERROR_OBJECT (nvenc, "Failed to register resource %p, ret %d",
-              in_gl_resource, nv_ret);
-#endif
 
         nvenc->input_bufs[i] = in_gl_resource;
         g_async_queue_push (nvenc->in_bufs_pool, nvenc->input_bufs[i]);
       }
 
-      //cuCtxPopCurrent (NULL);
     } else
-#endif
     {
       for (i = 0; i < nvenc->n_bufs; ++i) {
         NV_ENC_CREATE_INPUT_BUFFER cin_buf = { 0, };
@@ -1639,28 +1599,6 @@ gst_nv_base_enc_set_format (GstVideoEncoder * enc, GstVideoCodecState * state)
 
       g_async_queue_push (nvenc->bitstream_pool, nvenc->output_bufs[i]);
     }
-
-#if 0
-    /* Get SPS/PPS */
-    {
-      NV_ENC_SEQUENCE_PARAM_PAYLOAD seq_param = { 0 };
-      uint32_t seq_size = 0;
-
-      seq_param.version = NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER;
-      seq_param.spsppsBuffer = g_alloca (1024);
-      seq_param.inBufferSize = 1024;
-      seq_param.outSPSPPSPayloadSize = &seq_size;
-
-      nv_ret = NvEncGetSequenceParams (nvenc->encoder, &seq_param);
-      if (nv_ret != NV_ENC_SUCCESS) {
-        GST_WARNING_OBJECT (enc, "Failed to retrieve SPS/PPS: %d", nv_ret);
-        return FALSE;
-      }
-
-      /* FIXME: use SPS/PPS */
-      GST_MEMDUMP_OBJECT (enc, "SPS/PPS", seq_param.spsppsBuffer, seq_size);
-    }
-#endif
   }
 
   g_assert (nvenc_class->set_src_caps);
@@ -1722,106 +1660,6 @@ struct map_gl_input
   struct gl_input_resource *in_gl_resource;
 };
 
-#if 0
-static void
-_map_gl_input_buffer (GstGLContext * context, struct map_gl_input *data)
-{
-  cudaError_t cuda_ret;
-  guint8 *data_pointer;
-  guint i;
-
-  cuCtxPushCurrent (data->nvenc->cuda_ctx);
-  data_pointer = data->in_gl_resource->cuda_pointer;
-  for (i = 0; i < GST_VIDEO_INFO_N_PLANES (data->info); i++) {
-    guint plane_n_components;
-    GstGLBuffer *gl_buf_obj;
-    GstGLMemoryPBO *gl_mem;
-    guint src_stride, dest_stride;
-
-    gl_mem =
-        (GstGLMemoryPBO *) gst_buffer_peek_memory (data->frame->input_buffer,
-        i);
-    g_return_if_fail (gst_is_gl_memory_pbo ((GstMemory *) gl_mem));
-    data->in_gl_resource->gl_mem[i] = GST_GL_MEMORY_CAST (gl_mem);
-    plane_n_components = _plane_get_n_components (data->info, i);
-
-    gl_buf_obj = (GstGLBuffer *) gl_mem->pbo;
-    g_return_if_fail (gl_buf_obj != NULL);
-
-    /* get the texture into the PBO */
-    gst_gl_memory_pbo_upload_transfer (gl_mem);
-    gst_gl_memory_pbo_download_transfer (gl_mem);
-
-    GST_LOG_OBJECT (data->nvenc, "attempting to copy texture %u into cuda",
-        gl_mem->mem.tex_id);
-
-    cuda_ret =
-        cudaGraphicsGLRegisterBuffer (&data->in_gl_resource->cuda_texture,
-        gl_buf_obj->id, cudaGraphicsRegisterFlagsReadOnly);
-    if (cuda_ret != cudaSuccess) {
-      GST_ERROR_OBJECT (data->nvenc, "failed to register GL texture %u to cuda "
-          "ret :%d", gl_mem->mem.tex_id, cuda_ret);
-      g_assert_not_reached ();
-    }
-
-    cuda_ret =
-        cudaGraphicsMapResources (1, &data->in_gl_resource->cuda_texture, 0);
-    if (cuda_ret != cudaSuccess) {
-      GST_ERROR_OBJECT (data->nvenc, "failed to map GL texture %u into cuda "
-          "ret :%d", gl_mem->mem.tex_id, cuda_ret);
-      g_assert_not_reached ();
-    }
-
-    cuda_ret =
-        cudaGraphicsResourceGetMappedPointer (&data->in_gl_resource->
-        cuda_plane_pointers[i], &data->in_gl_resource->cuda_num_bytes,
-        data->in_gl_resource->cuda_texture);
-    if (cuda_ret != cudaSuccess) {
-      GST_ERROR_OBJECT (data->nvenc, "failed to get mapped pointer of map GL "
-          "texture %u in cuda ret :%d", gl_mem->mem.tex_id, cuda_ret);
-      g_assert_not_reached ();
-    }
-
-    src_stride = GST_VIDEO_INFO_PLANE_STRIDE (data->info, i);
-    dest_stride = data->in_gl_resource->cuda_stride;
-
-    /* copy into scratch buffer */
-    cuda_ret =
-        cudaMemcpy2D (data_pointer, dest_stride,
-        data->in_gl_resource->cuda_plane_pointers[i], src_stride,
-        _get_plane_width (data->info, i) * plane_n_components,
-        _get_plane_height (data->info, i), cudaMemcpyDeviceToDevice);
-    if (cuda_ret != cudaSuccess) {
-      GST_ERROR_OBJECT (data->nvenc, "failed to copy GL texture %u into cuda "
-          "ret :%d", gl_mem->mem.tex_id, cuda_ret);
-      g_assert_not_reached ();
-    }
-
-    cuda_ret =
-        cudaGraphicsUnmapResources (1, &data->in_gl_resource->cuda_texture, 0);
-    if (cuda_ret != cudaSuccess) {
-      GST_ERROR_OBJECT (data->nvenc, "failed to unmap GL texture %u from cuda "
-          "ret :%d", gl_mem->mem.tex_id, cuda_ret);
-      g_assert_not_reached ();
-    }
-
-    cuda_ret =
-        cudaGraphicsUnregisterResource (data->in_gl_resource->cuda_texture);
-    if (cuda_ret != cudaSuccess) {
-      GST_ERROR_OBJECT (data->nvenc, "failed to unregister GL texture %u from "
-          "cuda ret :%d", gl_mem->mem.tex_id, cuda_ret);
-      g_assert_not_reached ();
-    }
-
-    data_pointer =
-        data_pointer +
-        data->in_gl_resource->cuda_stride *
-        _get_plane_height (&data->nvenc->input_info, i);
-  }
-  cuCtxPopCurrent (NULL);
-}
-#endif
-
 static GstFlowReturn
 _acquire_input_buffer (D3DGstNvBaseEnc * nvenc, gpointer * input)
 {
@@ -1858,16 +1696,7 @@ _submit_input_buffer (D3DGstNvBaseEnc * nvenc, GstVideoCodecFrame * frame,
   pic_params.inputHeight = meta->height;
   pic_params.outputBitstream = outputBufferPtr;
   pic_params.completionEvent = NULL;
-#if 0
-  if (GST_VIDEO_FRAME_IS_INTERLACED (vframe)) {
-    if (GST_VIDEO_FRAME_IS_TFF (vframe))
-      pic_params.pictureStruct = NV_ENC_PIC_STRUCT_FIELD_TOP_BOTTOM;
-    else
-      pic_params.pictureStruct = NV_ENC_PIC_STRUCT_FIELD_BOTTOM_TOP;
-  } else {
-    pic_params.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
-  }
-#endif
+
   pic_params.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
   pic_params.inputTimeStamp = frame->pts;
   pic_params.inputDuration =
@@ -1887,11 +1716,21 @@ _submit_input_buffer (D3DGstNvBaseEnc * nvenc, GstVideoCodecFrame * frame,
 
   nv_ret = gl_NvEncEncodePicture(nvenc->context, nvenc->encoder, &pic_params);
   if (nv_ret == NV_ENC_SUCCESS) {
-    GST_LOG_OBJECT (nvenc, "Encoded picture");
+    GST_LOG ("Encoded picture: %d", outputBufferPtr);
+    void *b_frame_buffer = g_async_queue_try_pop(nvenc->holding_queue);
+    if (b_frame_buffer) {
+      g_async_queue_push(nvenc->bitstream_queue, b_frame_buffer);
+      g_async_queue_push(nvenc->holding_queue, outputBufferPtr);
+    }
+    else {
+      g_async_queue_push(nvenc->bitstream_queue, outputBufferPtr);
+    }
   } else if (nv_ret == NV_ENC_ERR_NEED_MORE_INPUT) {
     /* FIXME: we should probably queue pending output buffers here and only
      * submit them to the async queue once we got sucess back */
-    GST_DEBUG_OBJECT (nvenc, "Encoded picture (encoder needs more input)");
+    GST_DEBUG("Encoded picture (encoder needs more input) %d", outputBufferPtr);
+
+    g_async_queue_push(nvenc->holding_queue, outputBufferPtr);
   } else {
     GST_ERROR_OBJECT (nvenc, "Failed to encode picture: %d", nv_ret);
     GST_DEBUG_OBJECT (nvenc, "re-enqueueing input buffer %p", inputBuffer);
@@ -1901,9 +1740,6 @@ _submit_input_buffer (D3DGstNvBaseEnc * nvenc, GstVideoCodecFrame * frame,
 
     return GST_FLOW_ERROR;
   }
-
-  g_async_queue_push (nvenc->bitstream_queue, outputBufferPtr);
-
   return GST_FLOW_OK;
 }
 
@@ -2055,10 +1891,10 @@ gst_nv_base_enc_drain_encoder (D3DGstNvBaseEnc * nvenc)
 
   nv_ret = gl_NvEncEncodePicture (nvenc->context, nvenc->encoder, &pic_params);
   if (nv_ret != NV_ENC_SUCCESS) {
-    GST_LOG_OBJECT (nvenc, "Failed to drain encoder, ret %d", nv_ret);
+    GST_ERROR_OBJECT (nvenc, "Failed to drain encoder, ret %d", nv_ret);
     return FALSE;
   }
-
+  GST_DEBUG("Encoder drained.");
   return TRUE;
 }
 
@@ -2069,10 +1905,10 @@ gst_nv_base_enc_finish (GstVideoEncoder * enc)
 
   GST_FIXME_OBJECT (enc, "implement finish");
 
-  gst_nv_base_enc_drain_encoder (nvenc);
+  //gst_nv_base_enc_drain_encoder (nvenc);
 
   /* wait for encoder to output the remaining buffers */
-  gst_nv_base_enc_stop_bitstream_thread (nvenc);
+  //gst_nv_base_enc_stop_bitstream_thread (nvenc);
 
   return GST_FLOW_OK;
 }
@@ -2178,16 +2014,7 @@ static gboolean gst_nv_base_enc_propose_allocation (GstVideoEncoder * enc, GstQu
   gst_query_add_allocation_meta(query, GST_GL_SYNC_META_API_TYPE, 0);
   if (!gst_caps_features_contains (features, GST_CAPS_FEATURE_MEMORY_GL_MEMORY)) {
       GST_ERROR_OBJECT(self, "shouldn't GL MEMORY be negotiated?");
-  }
-
-  // offer our custom allocator
-  GstAllocator *allocator;
-  GstAllocationParams params;
-  gst_allocation_params_init (&params);
-
-  allocator = GST_ALLOCATOR (self->allocator);
-  gst_query_add_allocation_param (query, allocator, &params);
-  gst_object_unref (allocator); 
+  } 
 
   GstVideoInfo info;
   if (!gst_video_info_from_caps (&info, caps))
@@ -2216,6 +2043,14 @@ static gboolean gst_nv_base_enc_propose_allocation (GstVideoEncoder * enc, GstQu
     }
   }
 
+  // offer our custom allocator
+  GstAllocator *allocator;
+  GstAllocationParams params;
+  gst_allocation_params_init(&params);
+
+  allocator = GST_ALLOCATOR(self->allocator);
+  gst_query_add_allocation_param(query, allocator, &params);
+  gst_object_unref(allocator);
   GST_DEBUG("Make a new buffer pool.");
   self->pool = gst_gl_buffer_pool_new(self->context);
   GstStructure *config;

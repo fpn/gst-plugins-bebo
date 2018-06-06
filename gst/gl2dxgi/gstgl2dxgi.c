@@ -32,7 +32,7 @@
 #include "gstgl2dxgi.h"
 #include "gstdxgidevice.h"
 
-#define BUFFER_COUNT 50
+#define BUFFER_COUNT 30
 #define INTERNAL_QUEUE_SIZE 4
 #define SUPPORTED_GL_APIS GST_GL_API_OPENGL3
 
@@ -909,6 +909,7 @@ _find_local_gl_context(GstGLBaseFilter * filter)
 static gboolean
 gst_gl2dxgi_ensure_gl_context(GstGL2DXGI * self) {
   GstGLBaseFilter * gl_base_filter = GST_GL_BASE_FILTER(self);
+  g_assert(gl_base_filter);
   return gst_dxgi_device_ensure_gl_context((GstElement *)self, &gl_base_filter->context, &self->other_context, &gl_base_filter->display);
 }
 
@@ -1014,15 +1015,6 @@ gst_gl_2_dxgi_decide_allocation (GstBaseTransform * trans,
       GST_INFO_OBJECT(self, "shouldn't GL MEMORY be negotiated?");
   }
 
-  // offer our custom allocator
-  GstAllocator *allocator;
-  GstAllocationParams params;
-  gst_allocation_params_init (&params);
-
-  allocator = GST_ALLOCATOR (self->allocator);
-  gst_query_add_allocation_param (query, allocator, &params);
-  gst_object_unref (allocator);
-
   GstVideoInfo info;
   if (!gst_video_info_from_caps (&info, caps))
     goto invalid_caps;
@@ -1049,6 +1041,15 @@ gst_gl_2_dxgi_decide_allocation (GstBaseTransform * trans,
       gst_object_unref(self->pool);
     }
   }
+
+  // offer our custom allocator
+  GstAllocator *allocator;
+  GstAllocationParams params;
+  gst_allocation_params_init(&params);
+
+  allocator = GST_ALLOCATOR(self->allocator);
+  gst_query_add_allocation_param(query, allocator, &params);
+  gst_object_unref(allocator);
 
   GST_DEBUG("Make a new buffer pool.");
   self->pool = gst_gl_buffer_pool_new(GST_GL_BASE_FILTER(self)->context);
