@@ -113,103 +113,6 @@
 GST_DEBUG_CATEGORY_STATIC (x264_enc_debug);
 #define GST_CAT_DEFAULT x264_enc_debug
 
-struct _GstX264EncVTable
-{
-  GModule *module;
-
-#if X264_BUILD < 153
-  const int *x264_bit_depth;
-#endif
-  const int *x264_chroma_format;
-  void (*x264_encoder_close) (x264_t *);
-  int (*x264_encoder_delayed_frames) (x264_t *);
-  int (*x264_encoder_encode) (x264_t *, x264_nal_t ** pp_nal, int *pi_nal,
-      x264_picture_t * pic_in, x264_picture_t * pic_out);
-  int (*x264_encoder_headers) (x264_t *, x264_nal_t ** pp_nal, int *pi_nal);
-  void (*x264_encoder_intra_refresh) (x264_t *);
-  int (*x264_encoder_maximum_delayed_frames) (x264_t *);
-  x264_t *(*x264_encoder_open) (x264_param_t *);
-  int (*x264_encoder_reconfig) (x264_t *, x264_param_t *);
-  const x264_level_t (*x264_levels)[];
-  void (*x264_param_apply_fastfirstpass) (x264_param_t *);
-  int (*x264_param_apply_profile) (x264_param_t *, const char *);
-  void (*x264_param_default) (x264_param_t *);
-  int (*x264_param_default_preset) (x264_param_t *, const char *preset,
-      const char *tune);
-  int (*x264_param_parse) (x264_param_t *, const char *name, const char *value);
-};
-
-static GstX264EncVTable default_vtable;
-
-static GstX264EncVTable *vtable_8bit = NULL, *vtable_10bit = NULL;
-
-#define LOAD_SYMBOL(name) G_STMT_START { \
-  if (!g_module_symbol (module, #name, (gpointer *) &vtable->name)) { \
-    GST_ERROR ("Failed to load '" #name "' from '%s'", filename); \
-    goto error; \
-  } \
-} G_STMT_END;
-
-#ifdef HAVE_X264_ADDITIONAL_LIBRARIES
-static GstX264EncVTable *
-load_x264 (const gchar * filename)
-{
-  GModule *module;
-  GstX264EncVTable *vtable;
-
-  module = g_module_open (filename, G_MODULE_BIND_LOCAL);
-  if (!module) {
-    GST_ERROR ("Failed to load '%s'", filename);
-    return NULL;
-  }
-
-  vtable = g_new0 (GstX264EncVTable, 1);
-  vtable->module = module;
-
-  if (!g_module_symbol (module, G_STRINGIFY (x264_encoder_open),
-          (gpointer *) & vtable->x264_encoder_open)) {
-    GST_ERROR ("Failed to load '" G_STRINGIFY (x264_encoder_open)
-        "' from '%s'. Incompatible version?", filename);
-    goto error;
-  }
-#if X264_BUILD < 153
-  LOAD_SYMBOL (x264_bit_depth);
-#endif
-  LOAD_SYMBOL (x264_chroma_format);
-  LOAD_SYMBOL (x264_encoder_close);
-  LOAD_SYMBOL (x264_encoder_delayed_frames);
-  LOAD_SYMBOL (x264_encoder_encode);
-  LOAD_SYMBOL (x264_encoder_headers);
-  LOAD_SYMBOL (x264_encoder_intra_refresh);
-  LOAD_SYMBOL (x264_encoder_maximum_delayed_frames);
-  LOAD_SYMBOL (x264_encoder_reconfig);
-  LOAD_SYMBOL (x264_levels);
-  LOAD_SYMBOL (x264_param_apply_fastfirstpass);
-  LOAD_SYMBOL (x264_param_apply_profile);
-  LOAD_SYMBOL (x264_param_default);
-  LOAD_SYMBOL (x264_param_default_preset);
-  LOAD_SYMBOL (x264_param_parse);
-
-  return vtable;
-
-error:
-  g_module_close (vtable->module);
-  g_free (vtable);
-  return NULL;
-}
-
-static void
-unload_x264 (GstX264EncVTable * vtable)
-{
-  if (vtable->module) {
-    g_module_close (vtable->module);
-    g_free (vtable);
-  }
-}
-#endif
-
-#undef LOAD_SYMBOL
-
 static gboolean
 gst_x264_enc_add_x264_chroma_format (GstStructure * s,
     gboolean allow_420, gboolean allow_422, gboolean allow_444)
@@ -221,8 +124,8 @@ gst_x264_enc_add_x264_chroma_format (GstStructure * s,
   g_value_init (&fmts, GST_TYPE_LIST);
   g_value_init (&fmt, G_TYPE_STRING);
 
-  if (vtable_8bit) {
-    gint chroma_format = *vtable_8bit->x264_chroma_format;
+  if (1) {
+    gint chroma_format = x264_chroma_format;
 
     GST_INFO ("8-bit depth supported");
 
@@ -246,8 +149,8 @@ gst_x264_enc_add_x264_chroma_format (GstStructure * s,
     }
   }
 
-  if (vtable_10bit) {
-    gint chroma_format = *vtable_10bit->x264_chroma_format;
+  if (1) {
+    gint chroma_format = x264_chroma_format;
 
     GST_INFO ("10-bit depth supported");
 
@@ -290,72 +193,6 @@ gst_x264_enc_add_x264_chroma_format (GstStructure * s,
 
   return ret;
 }
-
-#if X264_BUILD < 153
-static gboolean
-load_x264_libraries (void)
-{
-  if (*default_vtable.x264_bit_depth == 8) {
-    vtable_8bit = &default_vtable;
-  } else if (*default_vtable.x264_bit_depth == 10) {
-    vtable_10bit = &default_vtable;
-  }
-#ifdef HAVE_X264_ADDITIONAL_LIBRARIES
-  {
-    gchar **libraries = g_strsplit (HAVE_X264_ADDITIONAL_LIBRARIES, ":", -1);
-    gchar **p = libraries;
-
-    while (*p && (!vtable_8bit || !vtable_10bit)) {
-      GstX264EncVTable *vtable = load_x264 (*p);
-
-      if (vtable) {
-        if (!vtable_8bit && *vtable->x264_bit_depth == 8) {
-          vtable_8bit = vtable;
-        } else if (!vtable_10bit && *vtable->x264_bit_depth == 10) {
-          vtable_10bit = vtable;
-        } else {
-          unload_x264 (vtable);
-        }
-      }
-
-      p++;
-    }
-    g_strfreev (libraries);
-  }
-#endif
-
-  if (!vtable_8bit && !vtable_10bit)
-    return FALSE;
-
-  return TRUE;
-}
-
-#else /* X264_BUILD >= 153 */
-
-static gboolean
-load_x264_libraries (void)
-{
-#if X264_BIT_DEPTH == 0         /* all */
-  vtable_8bit = &default_vtable;
-  vtable_10bit = &default_vtable;
-#elif X264_BIT_DEPTH == 8
-  vtable_8bit = &default_vtable;
-#elif X264_BIT_DEPTH == 10
-  vtable_10bit = &default_vtable;
-#else
-#error "unexpected X264_BIT_DEPTH value"
-#endif
-
-#ifdef HAVE_X264_ADDITIONAL_LIBRARIES
-  GST_WARNING ("Ignoring configured additional libraries %s, using libx264 "
-      "version enabled for multiple bit depths",
-      HAVE_X264_ADDITIONAL_LIBRARIES);
-#endif
-
-  return TRUE;
-}
-
-#endif
 
 enum
 {
@@ -1919,7 +1756,6 @@ gst_x264_enc_close_encoder (GstX264Enc * encoder)
     x264_encoder_close (encoder->x264enc);
     encoder->x264enc = NULL;
   }
-  encoder->vtable = NULL;
 }
 
 static gboolean
@@ -2353,12 +2189,8 @@ gst_x264_enc_propose_allocation (GstVideoEncoder * encoder, GstQuery * query)
   if (!self->input_state)
     return FALSE;
 
-  if (self->vtable == NULL)
-    return FALSE;
-
   info = &self->input_state->info;
-  num_buffers =
-      self->vtable->x264_encoder_maximum_delayed_frames (self->x264enc) + 1;
+  num_buffers = x264_encoder_maximum_delayed_frames (self->x264enc) + 1;
 
   gst_query_add_allocation_pool (query, NULL, info->size, num_buffers, 0);
 
@@ -2935,42 +2767,4 @@ gst_x264_enc_get_property (GObject * object, guint prop_id,
       break;
   }
   GST_OBJECT_UNLOCK (encoder);
-}
-
-gboolean
-x264_plugin_init ()
-{
-  GST_DEBUG_CATEGORY_INIT (x264_enc_debug, "x264enc", 0,
-      "h264 encoding element");
-
-  GST_INFO ("linked against x264 build: %u", X264_BUILD);
-
-  /* Initialize the static GstX264EncVTable which is overriden in load_x264()
-   * if needed. We can't initialize statically because these values are not
-   * constant on Windows. */
-  default_vtable.module = NULL;
-#if X264_BUILD < 153
-  default_vtable.x264_bit_depth = &x264_bit_depth;
-#endif
-  default_vtable.x264_chroma_format = &x264_chroma_format;
-  default_vtable.x264_encoder_close = x264_encoder_close;
-  default_vtable.x264_encoder_delayed_frames = x264_encoder_delayed_frames;
-  default_vtable.x264_encoder_encode = x264_encoder_encode;
-  default_vtable.x264_encoder_headers = x264_encoder_headers;
-  default_vtable.x264_encoder_intra_refresh = x264_encoder_intra_refresh;
-  default_vtable.x264_encoder_maximum_delayed_frames =
-      x264_encoder_maximum_delayed_frames;
-  default_vtable.x264_encoder_open = x264_encoder_open;
-  default_vtable.x264_encoder_reconfig = x264_encoder_reconfig;
-  default_vtable.x264_levels = &x264_levels;
-  default_vtable.x264_param_apply_fastfirstpass =
-      x264_param_apply_fastfirstpass;
-  default_vtable.x264_param_apply_profile = x264_param_apply_profile;
-  default_vtable.x264_param_default = x264_param_default;
-  default_vtable.x264_param_default_preset = x264_param_default_preset;
-  default_vtable.x264_param_parse = x264_param_parse;
-
-  if (!load_x264_libraries ())
-    return FALSE;
-  return TRUE;
 }
