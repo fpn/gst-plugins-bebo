@@ -147,9 +147,20 @@ gst_x264_enc_add_x264_chroma_format (GstStructure * s,
       g_value_set_string (&fmt, "NV12");
       gst_value_list_append_value (&fmts, &fmt);
     }
+
+    g_value_set_string(&fmt, "RGBA");
+    gst_value_list_append_value(&fmts, &fmt);
+    g_value_set_string(&fmt, "BGRA");
+    gst_value_list_append_value(&fmts, &fmt);
+    g_value_set_string(&fmt, "ARGB");
+    gst_value_list_append_value(&fmts, &fmt);
+    g_value_set_string(&fmt, "ABGR");
+    gst_value_list_append_value(&fmts, &fmt);
+    g_value_set_string(&fmt, "RGB");
+    gst_value_list_append_value(&fmts, &fmt);
   }
 
-  if (1) {
+  if (0) {
     gint chroma_format = x264_chroma_format;
 
     GST_INFO ("10-bit depth supported");
@@ -671,6 +682,7 @@ gst_x264_enc_sink_getcaps (GstVideoEncoder * enc, GstCaps * filter)
         }
 
         gst_x264_enc_add_x264_chroma_format (s, has_420, has_422, has_444);
+        
       }
 
       filter_caps = gst_caps_merge_structure (filter_caps, s);
@@ -1323,6 +1335,17 @@ gst_x264_enc_gst_to_x264_video_format (GstVideoFormat format, gint * nplanes)
       if (nplanes)
         *nplanes = 2;
       return X264_CSP_NV12;
+    case GST_VIDEO_FORMAT_BGRA:
+    case GST_VIDEO_FORMAT_RGBA:
+    case GST_VIDEO_FORMAT_ARGB:
+    case GST_VIDEO_FORMAT_ABGR:
+      if (nplanes)
+        *nplanes = 1;
+      return X264_CSP_BGRA;
+    case GST_VIDEO_FORMAT_RGB:
+      if (nplanes)
+        *nplanes = 1;
+      return X264_CSP_RGB;
     default:
       g_return_val_if_reached (GST_VIDEO_FORMAT_UNKNOWN);
   }
