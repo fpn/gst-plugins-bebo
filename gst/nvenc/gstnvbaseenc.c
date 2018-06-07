@@ -816,8 +816,11 @@ gst_nv_base_enc_close (GstVideoEncoder * enc)
   D3DGstNvBaseEnc *nvenc = GST_D3D_NV_BASE_ENC (enc);
   GST_DEBUG("Closing encoder");
   if (nvenc->encoder) {
-    if (NvEncDestroyEncoder (nvenc->encoder) != NV_ENC_SUCCESS)
+    NVENCSTATUS ret = NvEncDestroyEncoder(nvenc->encoder);
+    if (ret != NV_ENC_SUCCESS) {
+      GST_WARNING("Failed to destroy encoder with code: %d", ret);
       return FALSE;
+    }
     nvenc->encoder = NULL;
   }
 
