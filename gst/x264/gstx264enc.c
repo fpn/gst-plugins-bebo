@@ -1444,6 +1444,7 @@ gst_x264_enc_init_encoder (GstX264Enc * encoder)
   /* set up encoder parameters */
   encoder->x264param.i_csp =
       gst_x264_enc_gst_to_x264_video_format (info->finfo->format, NULL);
+  encoder->x264param.i_csp = X264_CSP_I420;
   if (info->fps_d == 0 || info->fps_n == 0) {
     /* No FPS so must use VFR
      * This raises latency apparently see http://mewiki.project357.com/wiki/X264_Encoding_Suggestions */
@@ -1511,7 +1512,7 @@ gst_x264_enc_init_encoder (GstX264Enc * encoder)
       encoder->x264param.vui.i_colorprim = 2;
       break;
   }
-
+  
   switch (info->colorimetry.transfer) {
     case GST_VIDEO_TRANSFER_BT709:
       encoder->x264param.vui.i_transfer = 1;
@@ -1563,12 +1564,15 @@ gst_x264_enc_init_encoder (GstX264Enc * encoder)
       encoder->x264param.vui.i_colmatrix = 2;
       break;
   }
-
+  encoder->x264param.vui.i_colorprim = 5;
+  encoder->x264param.vui.i_colmatrix = 5;
+  encoder->x264param.vui.i_transfer = 5;
   if (info->colorimetry.range == GST_VIDEO_COLOR_RANGE_0_255) {
     encoder->x264param.vui.b_fullrange = 1;
   } else {
     encoder->x264param.vui.b_fullrange = 0;
   }
+  encoder->x264param.vui.b_fullrange = 0;
 
   switch (info->chroma_site) {
     case GST_VIDEO_CHROMA_SITE_MPEG2:
